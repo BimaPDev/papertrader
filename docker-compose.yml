@@ -7,3 +7,13 @@ services:
     volumes:
       - ./data:/app/data
       - ./secrets:/app/secrets:ro
+
+  monitor:
+    build: .
+    restart: unless-stopped
+    command: ["python", "monitor.py"]
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/app/secrets:ro
