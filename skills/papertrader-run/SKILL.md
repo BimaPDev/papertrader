@@ -16,7 +16,7 @@ description: "Use when running PaperTrader cycles, checking the leaderboard, int
 .venv/bin/python monitor.py --once  # single monitor poll
 ```
 
-Graduation monitor state: `data/monitor_seen.json` (dedupe), `data/graduates.csv` (alert log), `data/copy_trades.csv` (copy-wallet trades + investigation), `data/swarm_verdicts.csv` (rug/legit swarm). Tunables: `MONITOR_*` in `config.py`. Sources: pump.fun (no key) + optional GMGN trenches (`GMGN_API_KEY`) + copy wallets (`MONITOR_COPY_WALLETS` / `GMGN_COPY_WALLETS`; each buy → GMGN token info/security → swarm).
+Graduation monitor state: `data/monitor_seen.json` (alert dedupe, once per mint), `data/swarm_analyzed.json` (swarm once per mint), `data/graduates.csv` (alert log), `data/copy_trades.csv` (copy-wallet trades + investigation), `data/swarm_verdicts.csv` (rug/legit swarm). Default focus: **Almost + Migrated** only (`MONITOR_ALERT_KINDS` / `MONITOR_SWARM_KINDS`; GMGN skips `new_creation`). Add `"new"` or `dex_*` to those lists to widen. Tunables: `MONITOR_*` in `config.py`.
 
 **Copy wallets:** add Solana addresses to `MONITOR_COPY_WALLETS` (or env), then `monitor.py --seed` once. Optional `MONITOR_COPY_USE_SMARTMONEY` / `MONITOR_COPY_USE_KOL` poll public GMGN feeds without a wallet list. Investigation quick labels: `looks_real` / `caution` / `high_risk` / `fake_or_unknown`.
 

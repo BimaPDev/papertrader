@@ -25,6 +25,8 @@ Everything tunable lives in `config.py` — read live on every run, no reload/re
 | `MONITOR_COPY_WALLETS` | `[]` | Solana wallets to mirror via GMGN (or `GMGN_COPY_WALLETS` env) |
 | `MONITOR_COPY_USE_SMARTMONEY` / `KOL` | `False` | optional public GMGN trade feeds |
 | `MONITOR_COPY_INVESTIGATE` | `True` | run token info/security + swarm on new copy buys |
+| `MONITOR_GMGN_TYPES` | Almost + Migrated | drop `new_creation` to skip New-tab rugs |
+| `MONITOR_ALERT_KINDS` / `MONITOR_SWARM_KINDS` | `almost`, `migrated` | which stages alert + get graded |
 
 Changing `INITIAL_BALANCE`, fees, or stops mid-run only affects *new* fills/positions going forward — existing open positions in `data/state.json` keep whatever they were opened under. For a clean comparison after a config change, reset with `rm -rf data/` (see papertrader-run skill).
 

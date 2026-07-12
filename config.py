@@ -87,24 +87,32 @@ MONITOR_WATCH_NEAR_GRADUATION = True  # also alert bonding tokens near migrate
 MONITOR_NEAR_MIN_MARKET_CAP_USD = 40_000
 MONITOR_NEAR_MAX_MARKET_CAP_USD = 75_000  # pump.fun grad ~$69k; keep a band
 MONITOR_SEEN_CAP = 5_000            # trim persisted mint set
+MONITOR_SEEN_BY_MINT = True         # one alert per mint (ignore New→Almost→Migrated repeats)
+MONITOR_SWARM_ONCE_PER_MINT = True  # never re-run expensive swarm on the same mint
 
 # DexScreener Solana (https://dexscreener.com/solana) — profiles + boosts
-MONITOR_USE_DEXSCREENER = True
+# Off by default while focusing Almost/Migrated; add dex_* to MONITOR_ALERT_KINDS to use.
+MONITOR_USE_DEXSCREENER = False
 MONITOR_DEX_USE_PROFILES = True     # /token-profiles/latest/v1
 MONITOR_DEX_USE_BOOSTS = True       # /token-boosts/latest + top
 MONITOR_DEX_MAX_AGE_MINUTES = 24 * 60  # skip older pairs when pairCreatedAt known
 
 # GMGN.ai Solana trenches (https://gmgn.ai/?chain=sol) — New / Almost / Migrated
 # Needs GMGN_API_KEY in .env (https://gmgn.ai/ai). Soft-skips if missing.
+# Default: skip New (bonding-curve rugs); focus Almost + Migrated.
 MONITOR_USE_GMGN = True
 MONITOR_GMGN_TYPES = [
-    "new_creation",      # New — just created, still on bonding curve
+    # "new_creation",    # New — usually rugs; enable only if you want early noise
     "near_completion",   # Almost — bonding nearly full
     "completed",         # Migrated — graduated to DEX
 ]
 MONITOR_NEW_MAX_AGE_MINUTES = 30    # New tab: ignore creations older than this
 MONITOR_GMGN_FILTER_PRESET = "safe"  # None | "safe" | "strict" (server-side)
 MONITOR_GMGN_MAX_RUG_RATIO = 0.3
+
+# Which kinds alert / swarm. Kinds: new, almost, migrated, dex_profile, dex_boost, copy
+MONITOR_ALERT_KINDS = ["almost", "migrated"]
+MONITOR_SWARM_KINDS = ["almost", "migrated"]
 
 # Copy-trade wallet monitor (GMGN wallet activity + token info/security)
 # Put Solana addresses you want to mirror here, and/or set GMGN_COPY_WALLETS

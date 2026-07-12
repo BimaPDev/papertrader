@@ -34,6 +34,7 @@ from swarm.paper import manage_open_positions, maybe_buy
 console = Console()
 
 SEEN_FILE = config.DATA_DIR / "monitor_seen.json"
+SWARM_DONE_FILE = config.DATA_DIR / "swarm_analyzed.json"
 LOG_FILE = config.DATA_DIR / "graduates.csv"
 COPY_LOG_FILE = config.DATA_DIR / "copy_trades.csv"
 VERDICT_FILE = config.DATA_DIR / "swarm_verdicts.csv"
@@ -61,23 +62,109 @@ VERDICT_FIELDS = [
 ]
 
 
+def _normalize_seen_keys(raw: set[str]) -> set[str]:
+    """Collapse legacy kind:mint keys to mint:… when MONITOR_SEEN_BY_MINT."""
+    if not config.MONITOR_SEEN_BY_MINT:
+        return raw
+    out: set[str] = set()
+    for k in raw:
+        if not k:
+            continue
+        if k.startswith("copy:") or k.startswith("mint:"):
+            out.add(k)
+        elif ":" in k:
+            mint = k.split(":", 1)[1]
+            if mint:
+                out.add(f"mint:{mint}")
+        else:
+            out.add(f"mint:{k}")
+    return out
+
+
 def _load_seen() -> set[str]:
     if not SEEN_FILE.exists():
         return set()
     try:
         data = json.loads(SEEN_FILE.read_text())
-        return set(data.get("mints") or [])
+        return _normalize_seen_keys(set(data.get("mints") or []))
     except (json.JSONDecodeError, OSError):
         return set()
 
 
 def _save_seen(seen: set[str]):
-    mints = sorted(seen)[-config.MONITOR_SEEN_CAP :]
+    mints = sorted(_normalize_seen_keys(seen))[-config.MONITOR_SEEN_CAP :]
     SEEN_FILE.write_text(json.dumps({
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "mints": mints,
     }, indent=2))
 
+
+def _bootstrap_swarm_done_from_csv() -> set[str]:
+    """One-time: treat prior verdict CSV rows as already analyzed."""
+    if not VERDICT_FILE.exists():
+        return set()
+    done: set[str] = set()
+    try:
+        with VERDICT_FILE.open(newline="") as f:
+            for row in csv.DictReader(f):
+                mint = (row.get("mint") or "").strip()
+                if mint:
+                    done.add(mint)
+    except OSError:
+        return set()
+    return done
+
+
+def _load_swarm_done() -> set[str]:
+    if SWARM_DONE_FILE.exists():
+        try:
+            data = json.loads(SWARM_DONE_FILE.read_text())
+            return set(data.get("mints") or [])
+        except (json.JSONDecodeError, OSError):
+            pass
+    boot = _bootstrap_swarm_done_from_csv()
+    if boot:
+        _save_swarm_done(boot)
+        console.print(
+            f"  [dim]swarm: loaded {len(boot)} already-analyzed mint(s) "
+            f"from {VERDICT_FILE.name}[/dim]"
+        )
+    return boot
+
+
+def _save_swarm_done(done: set[str]):
+    mints = sorted(done)[-config.MONITOR_SEEN_CAP :]
+    SWARM_DONE_FILE.write_text(json.dumps({
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "mints": mints,
+    }, indent=2))
+
+
+def _alert_key(tok: dict) -> str:
+    """Dedupe key for alerts. Default: once per mint across stages/sources."""
+    mint = tok.get("mint") or ""
+    if config.MONITOR_SEEN_BY_MINT and mint:
+        return f"mint:{mint}"
+    return f"{tok.get('kind', 'migrated')}:{mint}"
+
+
+_SWARM_PRIORITY = {
+    "migrated": 0,
+    "almost": 1,
+    "dex_boost": 2,
+    "dex_profile": 3,
+    "dex": 3,
+    "copy": 4,
+    "new": 5,
+}
+
+
+def _swarm_sort_key(tok: dict):
+    return (
+        _SWARM_PRIORITY.get(tok.get("kind"), 9),
+        -(tok.get("liquidity_usd") or 0),
+        -(tok.get("market_cap") or 0),
+    )
 
 def _log_hits(hits: list[dict]):
     exists = LOG_FILE.exists()
@@ -480,6 +567,17 @@ def collect_candidates() -> list[dict]:
 
     tokens = _dedupe(tokens)
 
+    alert_kinds = set(getattr(config, "MONITOR_ALERT_KINDS", None) or [])
+    if alert_kinds:
+        before = len(tokens)
+        tokens = [t for t in tokens if t.get("kind") in alert_kinds]
+        dropped = before - len(tokens)
+        if dropped:
+            console.print(
+                f"  [dim]filtered to {', '.join(sorted(alert_kinds))} "
+                f"({len(tokens)} kept, {dropped} skipped)[/dim]"
+            )
+
     if config.MONITOR_ENRICH_DEXSCREENER and tokens:
         need = [t for t in tokens if t.get("liquidity_usd") is None]
         have = [t for t in tokens if t.get("liquidity_usd") is not None]
@@ -501,19 +599,47 @@ def collect_candidates() -> list[dict]:
 
 
 def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
-    """Analyze up to MONITOR_SWARM_MAX_PER_POLL hits; log + optional paper buy."""
+    """Analyze up to MONITOR_SWARM_MAX_PER_POLL hits; log + optional paper buy.
+
+    Skips mints already swarm-analyzed (once per mint). Prefers Migrated/Almost
+    over brand-new bonding-curve noise when capping.
+    """
     if not config.MONITOR_SWARM_ENABLED or not hits:
         return []
 
-    batch = hits[: config.MONITOR_SWARM_MAX_PER_POLL]
-    if len(hits) > len(batch):
+    swarm_kinds = set(getattr(config, "MONITOR_SWARM_KINDS", None) or [])
+    done = _load_swarm_done()
+    queue: list[dict] = []
+    skipped = 0
+    skipped_kind = 0
+    for tok in hits:
+        if swarm_kinds and tok.get("kind") not in swarm_kinds:
+            skipped_kind += 1
+            continue
+        mint = tok.get("mint") or ""
+        if config.MONITOR_SWARM_ONCE_PER_MINT and mint and mint in done:
+            skipped += 1
+            continue
+        queue.append(tok)
+
+    queue.sort(key=_swarm_sort_key)
+    batch = queue[: config.MONITOR_SWARM_MAX_PER_POLL]
+    if skipped_kind:
         console.print(
-            f"  [yellow]swarm capped at {len(batch)}/{len(hits)} new hits "
-            f"this poll[/yellow]"
+            f"  [dim]swarm skip {skipped_kind} hit(s) outside "
+            f"{', '.join(sorted(swarm_kinds))}[/dim]"
+        )
+    if skipped:
+        console.print(f"  [dim]swarm skip {skipped} already-analyzed mint(s)[/dim]")
+    if len(queue) > len(batch):
+        console.print(
+            f"  [yellow]swarm capped at {len(batch)}/{len(queue)} candidates "
+            f"this poll (priority: Migrated → Almost)[/yellow]"
         )
 
     results = []
     for tok in batch:
+        mint = tok.get("mint") or ""
         label = KIND_LABEL.get(tok.get("kind"), tok.get("kind"))
         console.print(f"  swarm analyzing {tok.get('symbol')} ({label})…")
         try:
@@ -521,6 +647,8 @@ def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
         except Exception:
             console.print(f"  [red]swarm failed for {tok.get('symbol')}[/red]")
             traceback.print_exc()
+            if mint:
+                done.add(mint)  # don't retry forever on hard failures
             continue
         bought = None
         try:
@@ -535,7 +663,10 @@ def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
             traceback.print_exc()
         _log_verdict(tok, verdict, bought)
         results.append((tok, verdict, bought))
+        if mint:
+            done.add(mint)
 
+    _save_swarm_done(done)
     _print_verdicts(results)
     return results
 
@@ -598,7 +729,7 @@ def poll_once(*, seed: bool = False) -> list[dict]:
 
     new_hits = []
     for tok in candidates:
-        key = f"{tok.get('kind', 'migrated')}:{tok['mint']}"
+        key = _alert_key(tok)
         if key in seen:
             continue
         seen.add(key)
@@ -620,7 +751,7 @@ def poll_once(*, seed: bool = False) -> list[dict]:
 
     if new_hits:
         _log_hits(new_hits)
-        _print_hits(new_hits, "New / Almost / Migrated alerts")
+        _print_hits(new_hits, "Almost / Migrated alerts")
         run_swarm(new_hits)
     else:
         console.print(
@@ -655,7 +786,7 @@ def main():
         if config.MONITOR_PAPER_TRADE:
             swarm_bit += "/sniper"
     console.print(
-        "[bold]Graduation + copy-trade monitor[/bold] — New / Almost / Migrated via "
+        "[bold]Graduation + copy-trade monitor[/bold] — Almost / Migrated via "
         + " + ".join(sources)
         + swarm_bit
         + f"  poll={config.MONITOR_POLL_SECONDS}s  "
