@@ -121,7 +121,8 @@ def load_swarm_done() -> dict[str, dict]:
                 return dict(data["records"])
             if isinstance(data, dict) and isinstance(data.get("mints"), list):
                 stamp = data.get("updated_at") or _now()
-                return {m: {"at": stamp, "stage": "unknown"} for m in data["mints"] if m}
+                # Treat pre-refactor mints as fully analyzed (avoid mass STAGE↑ rescore)
+                return {m: {"at": stamp, "stage": "migrated"} for m in data["mints"] if m}
         return {}
 
 
@@ -195,13 +196,13 @@ def enqueue_job(token: dict, *, reason: str = "new") -> str | None:
     jid = job_id_for(token)
     with _lock:
         jobs = load_pending()
-        # Deduplicate identical mint:kind still pending
-        if jid in jobs:
-            return None
-        # Also skip if a higher-or-equal stage job already pending for mint
-        for existing in jobs.values():
-            if existing.get("mint") == mint and stage_rank(existing.get("kind")) >= stage_rank(kind):
+        # Drop lower-or-equal stage jobs for this mint; keep only the best stage
+        for eid, existing in list(jobs.items()):
+            if existing.get("mint") != mint:
+                continue
+            if stage_rank(existing.get("kind")) >= stage_rank(kind):
                 return None
+            jobs.pop(eid, None)
         jobs[jid] = {
             "id": jid,
             "mint": mint,
@@ -216,7 +217,7 @@ def enqueue_job(token: dict, *, reason: str = "new") -> str | None:
 
 
 def pop_next_jobs(limit: int) -> list[dict]:
-    """Return up to `limit` jobs sorted by swarm priority (does not remove yet)."""
+    """Return up to `limit` jobs sorted by swarm priority (one per mint)."""
     priority = {
         "migrated": 0,
         "almost": 1,
@@ -233,7 +234,18 @@ def pop_next_jobs(limit: int) -> list[dict]:
             j.get("enqueued_at") or "",
         )
     )
-    return jobs[:limit]
+    out: list[dict] = []
+    seen_mints: set[str] = set()
+    for j in jobs:
+        mint = j.get("mint") or ""
+        if mint and mint in seen_mints:
+            continue
+        if mint:
+            seen_mints.add(mint)
+        out.append(j)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def ack_job(job_id: str) -> None:
