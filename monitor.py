@@ -476,34 +476,68 @@ def collect_copy_candidates() -> list[dict]:
 
 
 def investigate_copy_trades(trades: list[dict]) -> list[dict]:
-    """Attach GMGN token info/security to each trade (buys first, capped)."""
+    """Attach GMGN token info/security to each trade (buys first, capped).
+
+    Investigates each mint once, then fans the dossier out to every wallet
+    fill on that mint (avoids re-fetching Scamlon 4× when 4 wallets ape it).
+    """
     if not config.MONITOR_COPY_INVESTIGATE or not trades:
         return trades
 
     buys = [t for t in trades if t.get("side") == "buy"]
     sells = [t for t in trades if t.get("side") != "buy"]
-    batch = buys[: config.MONITOR_COPY_MAX_INVESTIGATE]
-    skipped = len(buys) - len(batch)
-    if skipped > 0:
+
+    # Unique mints first (preserve buy order), capped
+    mint_order: list[str] = []
+    for t in buys:
+        mint = t.get("mint") or ""
+        if mint and mint not in mint_order:
+            mint_order.append(mint)
+    mint_batch = mint_order[: config.MONITOR_COPY_MAX_INVESTIGATE]
+    skipped_mints = len(mint_order) - len(mint_batch)
+    if skipped_mints > 0:
         console.print(
-            f"  [yellow]copy investigate capped at {len(batch)}/{len(buys)} "
-            f"buys this poll[/yellow]"
+            f"  [yellow]copy investigate capped at {len(mint_batch)}/"
+            f"{len(mint_order)} mints this poll[/yellow]"
         )
 
-    out: list[dict] = []
-    for t in batch:
+    dossier_by_mint: dict[str, dict] = {}
+    for mint in mint_batch:
+        sample = next(t for t in buys if t.get("mint") == mint)
         console.print(
-            f"  investigating {t.get('symbol')} ({t.get('mint', '')[:8]}…)…"
+            f"  investigating {sample.get('symbol')} ({mint[:8]}…)…"
         )
         try:
-            out.append(gmgn_fetcher.investigate_token(t))
+            dossier_by_mint[mint] = gmgn_fetcher.investigate_token(sample)
         except Exception:
-            console.print(f"  [red]investigate failed for {t.get('symbol')}[/red]")
+            console.print(f"  [red]investigate failed for {sample.get('symbol')}[/red]")
             traceback.print_exc()
-            t = {**t, "investigation_quick": "unknown", "investigation_flags": ["investigate_failed"]}
-            out.append(t)
-    # Sells / overflow buys: log without full investigation
-    for t in sells + buys[len(batch):]:
+            dossier_by_mint[mint] = {
+                **sample,
+                "investigation_quick": "unknown",
+                "investigation_flags": ["investigate_failed"],
+            }
+
+    out: list[dict] = []
+    for t in buys:
+        mint = t.get("mint") or ""
+        dossier = dossier_by_mint.get(mint)
+        if not dossier:
+            out.append({**t, "investigation_quick": t.get("investigation_quick") or "skipped"})
+            continue
+        # Keep this fill's wallet/tx/size; reuse shared token dossier
+        merged = {
+            **dossier,
+            "wallet": t.get("wallet"),
+            "tx_hash": t.get("tx_hash"),
+            "trade_usd": t.get("trade_usd"),
+            "side": t.get("side"),
+            "seen_key": t.get("seen_key"),
+            "source": t.get("source"),
+            "price": t.get("price") if t.get("price") is not None else dossier.get("price"),
+        }
+        out.append(merged)
+    for t in sells:
         out.append({**t, "investigation_quick": t.get("investigation_quick") or "skipped"})
     return out
 
@@ -610,6 +644,7 @@ def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
     swarm_kinds = set(getattr(config, "MONITOR_SWARM_KINDS", None) or [])
     done = _load_swarm_done()
     queue: list[dict] = []
+    queued_mints: set[str] = set()
     skipped = 0
     skipped_kind = 0
     for tok in hits:
@@ -617,9 +652,11 @@ def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
             skipped_kind += 1
             continue
         mint = tok.get("mint") or ""
-        if config.MONITOR_SWARM_ONCE_PER_MINT and mint and mint in done:
-            skipped += 1
-            continue
+        if config.MONITOR_SWARM_ONCE_PER_MINT and mint:
+            if mint in done or mint in queued_mints:
+                skipped += 1
+                continue
+            queued_mints.add(mint)
         queue.append(tok)
 
     queue.sort(key=_swarm_sort_key)
@@ -630,7 +667,7 @@ def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
             f"{', '.join(sorted(swarm_kinds))}[/dim]"
         )
     if skipped:
-        console.print(f"  [dim]swarm skip {skipped} already-analyzed mint(s)[/dim]")
+        console.print(f"  [dim]swarm skip {skipped} already-analyzed / duplicate mint(s)[/dim]")
     if len(queue) > len(batch):
         console.print(
             f"  [yellow]swarm capped at {len(batch)}/{len(queue)} candidates "
@@ -640,6 +677,9 @@ def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
     results = []
     for tok in batch:
         mint = tok.get("mint") or ""
+        # Re-check in case an earlier item in this batch just finished
+        if config.MONITOR_SWARM_ONCE_PER_MINT and mint and mint in done:
+            continue
         label = KIND_LABEL.get(tok.get("kind"), tok.get("kind"))
         console.print(f"  swarm analyzing {tok.get('symbol')} ({label})…")
         try:
@@ -702,12 +742,20 @@ def poll_copy_once(*, seed: bool = False, first_run: bool = False) -> list[dict]
     _log_copy_trades(investigated)
     _print_copy_trades(investigated)
 
-    # Swarm only buys that look at least tentatively real / caution
-    to_swarm = [
-        t for t in investigated
-        if t.get("side") == "buy"
-        and t.get("investigation_quick") not in ("skipped",)
-    ]
+    # Swarm only buys that look at least tentatively real / caution — once per mint
+    to_swarm: list[dict] = []
+    swarm_mints: set[str] = set()
+    for t in investigated:
+        if t.get("side") != "buy":
+            continue
+        if t.get("investigation_quick") in ("skipped",):
+            continue
+        mint = t.get("mint") or ""
+        if mint and mint in swarm_mints:
+            continue
+        if mint:
+            swarm_mints.add(mint)
+        to_swarm.append(t)
     if to_swarm:
         run_swarm(to_swarm)
     return investigated

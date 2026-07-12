@@ -908,7 +908,7 @@ def investigate_token(trade: dict) -> dict:
     created = info.get("creation_timestamp") or info.get("open_timestamp")
     age = _age_minutes_from_unix(created)
 
-    # Launchpad / stage heuristic
+    # Launchpad / stage heuristic (keep kind=copy for copy-trade rows)
     launchpad = (
         info.get("launchpad_platform")
         or info.get("launchpad")
@@ -916,11 +916,17 @@ def investigate_token(trade: dict) -> dict:
     )
     status = info.get("launchpad_status")
     if status == 2 or info.get("migrated_pool"):
-        kind = "migrated"
+        stage = "migrated"
     elif info.get("launchpad_progress") not in (None, "", 1, 1.0) and status == 1:
-        kind = "almost"
+        stage = "almost"
     else:
+        stage = "copy"
+    # Don't reclassify copy-wallet hits as trenches — that duplicates swarm work
+    # when the same mint also (or only) arrives via copy feeds.
+    if trade.get("kind") == "copy":
         kind = "copy"
+    else:
+        kind = stage
 
     renounced_mint = security.get("renounced_mint")
     renounced_freeze = security.get("renounced_freeze_account")
@@ -966,7 +972,8 @@ def investigate_token(trade: dict) -> dict:
 
     out = {
         **trade,
-        "kind": kind if kind != "copy" else "copy",
+        "kind": kind,
+        "stage": stage,
         "symbol": info.get("symbol") or trade.get("symbol"),
         "name": info.get("name") or trade.get("name") or "",
         "market_cap": mcap,
