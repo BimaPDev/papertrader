@@ -112,7 +112,7 @@ MONITOR_GMGN_MAX_RUG_RATIO = 0.3
 
 # Which kinds alert / swarm. Kinds: new, almost, migrated, dex_profile, dex_boost, copy
 MONITOR_ALERT_KINDS = ["almost", "migrated"]
-MONITOR_SWARM_KINDS = ["almost", "migrated"]
+MONITOR_SWARM_KINDS = ["almost", "migrated", "copy"]
 
 # Copy-trade wallet monitor (GMGN wallet activity + token info/security)
 # Put Solana addresses you want to mirror here, and/or set GMGN_COPY_WALLETS
