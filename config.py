@@ -44,8 +44,9 @@ STOP_LOSS_PCT = 12.0        # hard stop below entry
 TAKE_PROFIT_PCT = 25.0      # hard take-profit above entry
 
 # ── AI decision layer ───────────────────────────────────────────────────────
-# Provider: "claude" (default) or "openai_compatible" (DeepSeek/Groq/Ollama)
-AI_PROVIDER = "claude"
+# Provider: "claude", "openai_compatible" (DeepSeek/Groq/Ollama), or
+# "hermes_ssh" (route through a Hermes Agent instance over SSH)
+AI_PROVIDER = "hermes_ssh"
 AI_MODEL = "claude-opus-4-8"
 # Cheaper option for frequent cycles: AI_MODEL = "claude-haiku-4-5"
 
@@ -53,6 +54,15 @@ AI_MODEL = "claude-opus-4-8"
 OPENAI_COMPAT_BASE_URL = "https://api.deepseek.com/v1"
 OPENAI_COMPAT_MODEL = "deepseek-chat"
 OPENAI_COMPAT_KEY_ENV = "DEEPSEEK_KEY"
+
+# Used only when AI_PROVIDER = "hermes_ssh": mirrors the same SSH pattern
+# this homelab's AgentOS project already uses to talk to Hermes.
+HERMES_SSH_HOST = "192.168.50.86"
+HERMES_SSH_PORT = 22
+HERMES_SSH_USER = "hermes"
+HERMES_SSH_KEY_PATH = "/app/secrets/papertrader_hermes_ed25519"
+HERMES_BIN_PATH = "/home/hermes/.hermes/hermes-agent/venv/bin/hermes"
+HERMES_WORKDIR = "/home/hermes"
 
 AI_MAX_TOKENS = 2048
 
