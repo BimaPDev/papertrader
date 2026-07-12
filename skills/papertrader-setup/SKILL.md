@@ -21,6 +21,8 @@ cp .env.example .env
 |---|---|---|
 | `COINGECKO_API_KEY` | Recommended | Demo/free-tier key works — get one at coingecko.com/en/api. Runs without it but hits stricter anonymous rate limits. |
 | `BIRDEYE_API_KEY` | Yes | Needed for Solana meme-coin discovery/OHLCV. Without it, meme fetches silently return nothing (majors still work). Get one at birdeye.so. |
+| `GMGN_API_KEY` | Optional | Powers GMGN Solana trenches + copy-wallet monitoring in `monitor.py` (https://gmgn.ai/ai). Soft-skips if missing; pump.fun grads still work. |
+| `GMGN_COPY_WALLETS` | Optional | Comma-separated Solana wallets to mirror (same as `MONITOR_COPY_WALLETS` in `config.py`). |
 | `ANTHROPIC_API_KEY` | Yes (for AI strategies) | Powers the 3 AI personas. Rule-based strategies work without it; AI strategies error per-cycle and hold if missing. |
 | `DEEPSEEK_KEY` / `GROQ_API_KEY` | Only if using an OpenAI-compatible provider | See the papertrader-configure skill. |
 

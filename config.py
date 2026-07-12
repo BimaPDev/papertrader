@@ -69,6 +69,61 @@ AI_MAX_TOKENS = 2048
 # ── Loop ────────────────────────────────────────────────────────────────────
 CYCLE_MINUTES = 60          # matches 1H candles; also used to annualize Sharpe
 
+# ── Graduation monitor (monitor.py) ─────────────────────────────────────────
+# Watches pump.fun tokens that just completed the bonding curve ("graduated").
+# Separate from the hourly paper loop — these tokens rarely have ≥30 hourly
+# bars yet, so they won't feed strategies until you wire a short-history path.
+MONITOR_POLL_SECONDS = 30           # how often to poll pump.fun
+MONITOR_FETCH_LIMIT = 40            # candidates pulled per source per poll
+MONITOR_MAX_AGE_MINUTES = 120       # ignore graduates older than this
+MONITOR_MIN_MARKET_CAP_USD = 5_000  # drop dust / dead post-grad prints
+MONITOR_MIN_HOLDERS = 10
+MONITOR_MAX_SNIPER_PCT = 40.0       # skip if snipers own more than this %
+MONITOR_MAX_TOP_HOLDERS_PCT = 60.0  # skip extreme concentration
+MONITOR_MAX_DEV_HOLDINGS_PCT = 15.0
+MONITOR_ENRICH_DEXSCREENER = True   # attach liquidity / pair URL
+MONITOR_MIN_LIQUIDITY_USD = 3_000   # post-enrich floor for graduated only
+MONITOR_WATCH_NEAR_GRADUATION = True  # also alert bonding tokens near migrate
+MONITOR_NEAR_MIN_MARKET_CAP_USD = 40_000
+MONITOR_NEAR_MAX_MARKET_CAP_USD = 75_000  # pump.fun grad ~$69k; keep a band
+MONITOR_SEEN_CAP = 5_000            # trim persisted mint set
+
+# GMGN.ai Solana trenches (https://gmgn.ai/?chain=sol) — New / Almost / Migrated
+# Needs GMGN_API_KEY in .env (https://gmgn.ai/ai). Soft-skips if missing.
+MONITOR_USE_GMGN = True
+MONITOR_GMGN_TYPES = [
+    "new_creation",      # New — just created, still on bonding curve
+    "near_completion",   # Almost — bonding nearly full
+    "completed",         # Migrated — graduated to DEX
+]
+MONITOR_NEW_MAX_AGE_MINUTES = 30    # New tab: ignore creations older than this
+MONITOR_GMGN_FILTER_PRESET = "safe"  # None | "safe" | "strict" (server-side)
+MONITOR_GMGN_MAX_RUG_RATIO = 0.3
+
+# Copy-trade wallet monitor (GMGN wallet activity + token info/security)
+# Put Solana addresses you want to mirror here, and/or set GMGN_COPY_WALLETS
+# in .env as a comma-separated list. Soft-skips when empty / no API key.
+MONITOR_COPY_ENABLED = True
+MONITOR_COPY_WALLETS: list[str] = [
+    # "YourCopyTargetWallet1111111111111111111111111",
+]
+MONITOR_COPY_SIDES = ["buy"]          # investigate buys; sells are logged only
+MONITOR_COPY_MIN_USD = 10.0           # ignore dust fills
+MONITOR_COPY_FETCH_LIMIT = 20         # recent txs per wallet / feed
+MONITOR_COPY_MAX_AGE_MINUTES = 60     # ignore older fills when a wallet is first added
+MONITOR_COPY_USE_SMARTMONEY = False   # also poll GMGN public smart-money feed
+MONITOR_COPY_USE_KOL = False          # also poll GMGN public KOL feed
+MONITOR_COPY_INVESTIGATE = True       # token info+security + swarm on new buys
+MONITOR_COPY_MAX_INVESTIGATE = 5      # cap investigations per poll (rate limits)
+
+# Rug/legit swarm + paper sniper (monitor-owned; not in hourly main.py)
+MONITOR_SWARM_ENABLED = True
+MONITOR_SWARM_MAX_PER_POLL = 5      # max new hits to analyze per poll
+MONITOR_SWARM_WORKERS = 5           # parallel specialist LLM calls (5 agents)
+MONITOR_PAPER_TRADE = True          # buy paper positions on legit verdicts
+MONITOR_PAPER_MIN_CONFIDENCE = 70
+MONITOR_PAPER_STRATEGY = "Swarm sniper"
+
 # ── Paths ───────────────────────────────────────────────────────────────────
 from pathlib import Path
 DATA_DIR = Path(__file__).parent / "data"

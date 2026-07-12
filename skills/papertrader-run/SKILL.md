@@ -11,7 +11,16 @@ description: "Use when running PaperTrader cycles, checking the leaderboard, int
 .venv/bin/python main.py --once   # run exactly one cycle, then exit (cron/debugging)
 .venv/bin/python main.py          # run forever, one cycle every config.CYCLE_MINUTES (default 60)
 .venv/bin/python report.py        # print the current leaderboard without running a cycle
+.venv/bin/python monitor.py --seed  # mark current pump.fun graduates as seen (no alerts)
+.venv/bin/python monitor.py         # poll for new graduates / near-grads (config.MONITOR_POLL_SECONDS)
+.venv/bin/python monitor.py --once  # single monitor poll
 ```
+
+Graduation monitor state: `data/monitor_seen.json` (dedupe), `data/graduates.csv` (alert log), `data/copy_trades.csv` (copy-wallet trades + investigation), `data/swarm_verdicts.csv` (rug/legit swarm). Tunables: `MONITOR_*` in `config.py`. Sources: pump.fun (no key) + optional GMGN trenches (`GMGN_API_KEY`) + copy wallets (`MONITOR_COPY_WALLETS` / `GMGN_COPY_WALLETS`; each buy → GMGN token info/security → swarm).
+
+**Copy wallets:** add Solana addresses to `MONITOR_COPY_WALLETS` (or env), then `monitor.py --seed` once. Optional `MONITOR_COPY_USE_SMARTMONEY` / `MONITOR_COPY_USE_KOL` poll public GMGN feeds without a wallet list. Investigation quick labels: `looks_real` / `caution` / `high_risk` / `fake_or_unknown`.
+
+**Swarm + sniper:** on each new alert, five specialist agents (Security / Holders / Traders / Liquidity / Social) + an orchestrator (via `config.AI_PROVIDER`) verdict `rug` / `suspicious` / `legit`. Deep GMGN enrich adds Analysis %, phishing check, creator 7d realized PnL / win rate, avg buy MC, holder distribution. Hard short-circuit rugs phishing-fail / honeypot / extreme concentration / very low analysis without an LLM call. `MONITOR_PAPER_TRADE` paper-buys `legit` into strategy `"Swarm sniper"` in `data/state.json` (position key `SYMBOL:mintprefix`); SL/TP run every poll. Not part of hourly `main.py` strategies.
 
 Sharpe/drawdown are noisy until there are a few dozen equity samples (a day or two of hourly cycles) — don't over-read the leaderboard after only 1–2 cycles.
 

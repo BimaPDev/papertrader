@@ -22,6 +22,9 @@ Everything tunable lives in `config.py` — read live on every run, no reload/re
 | `AI_PROVIDER` | `"hermes_ssh"` | `"claude"`, `"openai_compatible"`, or `"hermes_ssh"` |
 | `AI_MODEL` | `"claude-opus-4-8"` | swap to `"claude-haiku-4-5"` for ~5x cheaper cycles |
 | `CYCLE_MINUTES` | 60 | loop cadence; also used to annualize Sharpe |
+| `MONITOR_COPY_WALLETS` | `[]` | Solana wallets to mirror via GMGN (or `GMGN_COPY_WALLETS` env) |
+| `MONITOR_COPY_USE_SMARTMONEY` / `KOL` | `False` | optional public GMGN trade feeds |
+| `MONITOR_COPY_INVESTIGATE` | `True` | run token info/security + swarm on new copy buys |
 
 Changing `INITIAL_BALANCE`, fees, or stops mid-run only affects *new* fills/positions going forward — existing open positions in `data/state.json` keep whatever they were opened under. For a clean comparison after a config change, reset with `rm -rf data/` (see papertrader-run skill).
 
