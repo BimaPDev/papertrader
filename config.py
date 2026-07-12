@@ -88,6 +88,12 @@ MONITOR_NEAR_MIN_MARKET_CAP_USD = 40_000
 MONITOR_NEAR_MAX_MARKET_CAP_USD = 75_000  # pump.fun grad ~$69k; keep a band
 MONITOR_SEEN_CAP = 5_000            # trim persisted mint set
 
+# DexScreener Solana (https://dexscreener.com/solana) — profiles + boosts
+MONITOR_USE_DEXSCREENER = True
+MONITOR_DEX_USE_PROFILES = True     # /token-profiles/latest/v1
+MONITOR_DEX_USE_BOOSTS = True       # /token-boosts/latest + top
+MONITOR_DEX_MAX_AGE_MINUTES = 24 * 60  # skip older pairs when pairCreatedAt known
+
 # GMGN.ai Solana trenches (https://gmgn.ai/?chain=sol) — New / Almost / Migrated
 # Needs GMGN_API_KEY in .env (https://gmgn.ai/ai). Soft-skips if missing.
 MONITOR_USE_GMGN = True

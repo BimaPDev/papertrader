@@ -25,7 +25,7 @@ from rich.table import Table
 
 import config
 from fetchers import gmgn as gmgn_fetcher
-from fetchers.dexscreener import enrich_many
+from fetchers.dexscreener import enrich_many, fetch_solana_markets
 from fetchers.gmgn import KIND_LABEL
 from fetchers.pumpfun import fetch_graduated, fetch_near_graduation
 from swarm.orchestra import analyze_token
@@ -462,6 +462,22 @@ def collect_candidates() -> list[dict]:
                 console.print("[red]GMGN trenches fetch failed[/red]")
                 traceback.print_exc()
 
+    if config.MONITOR_USE_DEXSCREENER:
+        try:
+            dex = fetch_solana_markets()
+            by_kind: dict[str, int] = {}
+            for t in dex:
+                by_kind[t["kind"]] = by_kind.get(t["kind"], 0) + 1
+            console.print(
+                f"  dexscreener solana: {len(dex)} after filters "
+                f"(profiles={by_kind.get('dex_profile', 0)}, "
+                f"boosts={by_kind.get('dex_boost', 0)})"
+            )
+            tokens.extend(dex)
+        except Exception:
+            console.print("[red]DexScreener Solana fetch failed[/red]")
+            traceback.print_exc()
+
     tokens = _dedupe(tokens)
 
     if config.MONITOR_ENRICH_DEXSCREENER and tokens:
@@ -623,6 +639,8 @@ def main():
     sources = ["pump.fun"]
     if config.MONITOR_USE_GMGN:
         sources.append("gmgn" if gmgn_fetcher.available() else "gmgn(no key)")
+    if config.MONITOR_USE_DEXSCREENER:
+        sources.append("dexscreener")
     if config.MONITOR_COPY_ENABLED:
         n = len(gmgn_fetcher.copy_wallets_from_config())
         bit = f"copy({n} wallets)"

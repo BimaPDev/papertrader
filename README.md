@@ -81,7 +81,9 @@ bonding curves (and optionally ones near graduation), plus wallets you want to
   GMGN `token/info` + `token/security` + holders/traders/creator 7d stats
   (phishing, Analysis %, win rate, avg buy MC, distribution) then scored by
   the rug/legit swarm
-- **DexScreener** enrichment for liquidity / pair URL when missing
+- **DexScreener Solana** — latest profiles + boosts from
+  https://dexscreener.com/solana (no key), liquidity/mcap filtered
+- **DexScreener enrichment** — pair liquidity / URL for other sources when missing
 
 Filters concentration/sniper/rug risk, logs new mints to `data/graduates.csv`
 and copy events to `data/copy_trades.csv` (seen set in `data/monitor_seen.json`).

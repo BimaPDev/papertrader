@@ -60,6 +60,9 @@ KIND_LABEL = {
     "almost": "Almost",
     "migrated": "Migrated",
     "copy": "Copy",
+    "dex_profile": "DexProfile",
+    "dex_boost": "DexBoost",
+    "dex": "DexScreener",
 }
 
 
