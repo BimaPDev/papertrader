@@ -23,6 +23,8 @@ pipeline/snapshot.py   collapses an indicator-enriched OHLCV frame into the flat
 engine/metrics.py      Sharpe/return/max-drawdown + decay_status (rolling-vs-baseline Sharpe health check)
 
 llm.py                 LLM client (Claude + OpenAI-compatible adapter), structured output schema
+skills_loader.py        Reads skills/<name>/SKILL.md for injection into an AI persona's system prompt
+skills/                 Reference docs, both self-authored (papertrader-*) and imported from HKUDS/Vibe-Trading
 ```
 
 ## Adding a rule-based strategy
@@ -64,6 +66,24 @@ Each AI strategy makes **one Claude API call per cycle** (`AIStrategy.decide` in
    ```
 4. **Validation** — raw output is filtered to symbols that actually exist in this cycle's snapshots, and to `buy`/`sell` only (holds are implicit/dropped). Guards against a hallucinated symbol reaching the fill logic.
 5. **Failure handling** — an API error (bad key, rate limit, network) is caught, logged, and treated as "hold everything" for that strategy that cycle. Never crashes the run.
+
+### Skill-backed personas
+
+An `AIStrategy` subclass can set a `skills: list[str]` class attribute naming one or more `skills/<name>/SKILL.md` docs (see `skills_loader.py`). Their content gets appended to that persona's system prompt as reference methodology, wrapped in an explicit instruction not to invent numbers for data the doc assumes but this system doesn't fetch (exchange reserves, sentiment scores, options data, fund filings, etc.) — these docs were written for HKUDS/Vibe-Trading's much larger toolset, not PaperTrader's.
+
+Current wiring, chosen for both relevance and token cost (full docs run ~1-10k tokens each and get paid for every cycle):
+
+| Persona | Skill | Why |
+|---|---|---|
+| AI momentum | `alpha-zoo` (~1k tokens) | Ties directly to the cross-sectional factor strategies already in `strategies/factors.py` |
+| AI contrarian | `risk-analysis` (~2.8k tokens) | VaR/CVaR/drawdown framing fits a persona that's supposed to sit in cash most cycles |
+| AI meme degen | `stablecoin-flow` (~2.5k tokens) | Crypto-native capital-flow signal, directly on-theme for meme-coin rotation |
+
+`skills/` also has 8 more imported Vibe-Trading docs (`social-media-intelligence`, `geopolitical-risk`, `hedging-strategy`, `ml-strategy`, `performance-attribution`, `minute-analysis`, `fund-analysis`, `private-company-research`) that are **not** wired into any persona by default:
+- `social-media-intelligence` (~10k tokens) and `geopolitical-risk` (~8k tokens) are relevant but expensive — attach them (add to a persona's `skills` list) only if you're OK with the added per-cycle cost.
+- `hedging-strategy` assumes short/options capability `engine/portfolio.py` doesn't have (spot-only, no shorting). `ml-strategy` assumes a training pipeline that doesn't exist here. `minute-analysis` assumes minute bars; PaperTrader runs on `CANDLE_TIMEFRAME = "1H"`. `fund-analysis` and `private-company-research` are equity/VC research — no overlap with a 5-asset crypto paper trader. They're kept as reference docs for completeness, not wired in.
+
+To add a skill to a persona: add its name to that class's `skills` list in `strategies/ai.py`. To add a brand-new skill doc: drop a `skills/<name>/SKILL.md` file (YAML frontmatter + markdown body, `skills_loader.load_skill` strips the frontmatter automatically).
 
 ## Adding a new asset source
 
