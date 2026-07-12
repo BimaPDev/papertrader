@@ -91,8 +91,7 @@ MONITOR_SEEN_BY_MINT = True         # one alert per mint (ignore New→Almost→
 MONITOR_SWARM_ONCE_PER_MINT = True  # never re-run expensive swarm on the same mint
 
 # DexScreener Solana (https://dexscreener.com/solana) — profiles + boosts
-# Off by default while focusing Almost/Migrated; add dex_* to MONITOR_ALERT_KINDS to use.
-MONITOR_USE_DEXSCREENER = False
+MONITOR_USE_DEXSCREENER = True
 MONITOR_DEX_USE_PROFILES = True     # /token-profiles/latest/v1
 MONITOR_DEX_USE_BOOSTS = True       # /token-boosts/latest + top
 MONITOR_DEX_MAX_AGE_MINUTES = 24 * 60  # skip older pairs when pairCreatedAt known
@@ -111,8 +110,8 @@ MONITOR_GMGN_FILTER_PRESET = "safe"  # None | "safe" | "strict" (server-side)
 MONITOR_GMGN_MAX_RUG_RATIO = 0.3
 
 # Which kinds alert / swarm. Kinds: new, almost, migrated, dex_profile, dex_boost, copy
-MONITOR_ALERT_KINDS = ["almost", "migrated"]
-MONITOR_SWARM_KINDS = ["almost", "migrated", "copy"]
+MONITOR_ALERT_KINDS = ["almost", "migrated", "dex_profile", "dex_boost"]
+MONITOR_SWARM_KINDS = ["almost", "migrated", "dex_profile", "dex_boost", "copy"]
 
 # Copy-trade wallet monitor (GMGN wallet activity + token info/security)
 # Put Solana addresses you want to mirror here, and/or set GMGN_COPY_WALLETS
