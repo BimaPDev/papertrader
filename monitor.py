@@ -1,12 +1,10 @@
 """Graduation + copy-trade monitor — trenches, wallet mirrors, rug/legit swarm.
 
-Separate from the hourly paper-trading loop: polls every few seconds/minutes,
-dedupes by mint / trade id, enriches with DexScreener / GMGN token security,
-runs a specialist swarm on new hits, logs verdicts, and optionally paper-buys
-`legit` tokens.
+Fast 15s producer loop: fetch → dedupe → enqueue → SL/TP.
+Background worker: durable pending queue → swarm → mark seen/analyzed.
 
 Usage:
-  python monitor.py            # poll forever
+  python monitor.py            # poll forever (+ background swarm worker)
   python monitor.py --once     # single poll (seeds seen set on first run)
   python monitor.py --seed     # mark current tokens/trades as seen without alerting
 """
@@ -14,8 +12,8 @@ Usage:
 from __future__ import annotations
 
 import csv
-import json
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -24,17 +22,18 @@ from rich.console import Console
 from rich.table import Table
 
 import config
+import monitor_state
 from fetchers import gmgn as gmgn_fetcher
 from fetchers.dexscreener import enrich_many, fetch_solana_markets
 from fetchers.gmgn import KIND_LABEL
 from fetchers.pumpfun import fetch_graduated, fetch_near_graduation
+from monitor_backoff import BACKOFF
+from monitor_heartbeat import touch_heartbeat
 from swarm.orchestra import analyze_token
-from swarm.paper import manage_open_positions, maybe_buy
+from swarm.paper import manage_open_positions, maybe_buy, maybe_sell_copy
 
 console = Console()
 
-SEEN_FILE = config.DATA_DIR / "monitor_seen.json"
-SWARM_DONE_FILE = config.DATA_DIR / "swarm_analyzed.json"
 LOG_FILE = config.DATA_DIR / "graduates.csv"
 COPY_LOG_FILE = config.DATA_DIR / "copy_trades.csv"
 VERDICT_FILE = config.DATA_DIR / "swarm_verdicts.csv"
@@ -61,110 +60,44 @@ VERDICT_FIELDS = [
     "wallet", "side", "investigation_quick",
 ]
 
-
-def _normalize_seen_keys(raw: set[str]) -> set[str]:
-    """Collapse legacy kind:mint keys to mint:… when MONITOR_SEEN_BY_MINT."""
-    if not config.MONITOR_SEEN_BY_MINT:
-        return raw
-    out: set[str] = set()
-    for k in raw:
-        if not k:
-            continue
-        if k.startswith("copy:") or k.startswith("mint:"):
-            out.add(k)
-        elif ":" in k:
-            mint = k.split(":", 1)[1]
-            if mint:
-                out.add(f"mint:{mint}")
-        else:
-            out.add(f"mint:{k}")
-    return out
-
-
-def _load_seen() -> set[str]:
-    if not SEEN_FILE.exists():
-        return set()
-    try:
-        data = json.loads(SEEN_FILE.read_text())
-        return _normalize_seen_keys(set(data.get("mints") or []))
-    except (json.JSONDecodeError, OSError):
-        return set()
-
-
-def _save_seen(seen: set[str]):
-    mints = sorted(_normalize_seen_keys(seen))[-config.MONITOR_SEEN_CAP :]
-    SEEN_FILE.write_text(json.dumps({
-        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "mints": mints,
-    }, indent=2))
-
-
-def _bootstrap_swarm_done_from_csv() -> set[str]:
-    """One-time: treat prior verdict CSV rows as already analyzed."""
-    if not VERDICT_FILE.exists():
-        return set()
-    done: set[str] = set()
-    try:
-        with VERDICT_FILE.open(newline="") as f:
-            for row in csv.DictReader(f):
-                mint = (row.get("mint") or "").strip()
-                if mint:
-                    done.add(mint)
-    except OSError:
-        return set()
-    return done
-
-
-def _load_swarm_done() -> set[str]:
-    if SWARM_DONE_FILE.exists():
-        try:
-            data = json.loads(SWARM_DONE_FILE.read_text())
-            return set(data.get("mints") or [])
-        except (json.JSONDecodeError, OSError):
-            pass
-    boot = _bootstrap_swarm_done_from_csv()
-    if boot:
-        _save_swarm_done(boot)
-        console.print(
-            f"  [dim]swarm: loaded {len(boot)} already-analyzed mint(s) "
-            f"from {VERDICT_FILE.name}[/dim]"
-        )
-    return boot
-
-
-def _save_swarm_done(done: set[str]):
-    mints = sorted(done)[-config.MONITOR_SEEN_CAP :]
-    SWARM_DONE_FILE.write_text(json.dumps({
-        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "mints": mints,
-    }, indent=2))
+_worker_stop = threading.Event()
 
 
 def _alert_key(tok: dict) -> str:
-    """Dedupe key for alerts. Default: once per mint across stages/sources."""
     mint = tok.get("mint") or ""
     if config.MONITOR_SEEN_BY_MINT and mint:
         return f"mint:{mint}"
     return f"{tok.get('kind', 'migrated')}:{mint}"
 
 
-_SWARM_PRIORITY = {
-    "migrated": 0,
-    "almost": 1,
-    "dex_boost": 2,
-    "dex_profile": 3,
-    "dex": 3,
-    "copy": 4,
-    "new": 5,
-}
+def _bootstrap_swarm_done_from_csv() -> None:
+    if monitor_state.load_swarm_done():
+        return
+    if not VERDICT_FILE.exists():
+        return
+    records: dict[str, dict] = {}
+    try:
+        with VERDICT_FILE.open(newline="") as f:
+            for row in csv.DictReader(f):
+                mint = (row.get("mint") or "").strip()
+                if not mint:
+                    continue
+                stage = row.get("kind") or "unknown"
+                prev = records.get(mint)
+                if prev is None or monitor_state.stage_rank(stage) >= monitor_state.stage_rank(prev.get("stage")):
+                    records[mint] = {
+                        "at": row.get("timestamp") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "stage": stage,
+                    }
+    except OSError:
+        return
+    if records:
+        monitor_state.save_swarm_done(records)
+        console.print(
+            f"  [dim]swarm: loaded {len(records)} already-analyzed mint(s) "
+            f"from {VERDICT_FILE.name}[/dim]"
+        )
 
-
-def _swarm_sort_key(tok: dict):
-    return (
-        _SWARM_PRIORITY.get(tok.get("kind"), 9),
-        -(tok.get("liquidity_usd") or 0),
-        -(tok.get("market_cap") or 0),
-    )
 
 def _log_hits(hits: list[dict]):
     exists = LOG_FILE.exists()
@@ -301,8 +234,9 @@ def _print_hits(hits: list[dict], title: str):
     for h in hits:
         link = h.get("gmgn_url") or h.get("pumpfun_url") or ""
         label = KIND_LABEL.get(h.get("kind"), h.get("kind"))
+        tag = "STAGE↑" if h.get("_stage_upgrade") else "ALERT"
         console.print(
-            f"  [green]ALERT[/green] {h['symbol']} ({label}) "
+            f"  [green]{tag}[/green] {h['symbol']} ({label}) "
             f"via={h.get('source')} mint={h['mint']}  {link}"
         )
 
@@ -410,7 +344,6 @@ def _print_copy_trades(trades: list[dict]):
 
 
 def _dedupe(tokens: list[dict]) -> list[dict]:
-    """Prefer GMGN when the same stage+mint appears from multiple sources."""
     by_key: dict[str, dict] = {}
     for t in tokens:
         key = f"{t.get('kind', 'migrated')}:{t['mint']}"
@@ -420,8 +353,24 @@ def _dedupe(tokens: list[dict]) -> list[dict]:
     return list(by_key.values())
 
 
+def _fetch_with_backoff(source: str, fn, *, label: str):
+    if not BACKOFF.allow(source):
+        rem = BACKOFF.remaining(source)
+        console.print(f"  [dim]{label} backoff {rem:.0f}s remaining[/dim]")
+        return None
+    try:
+        result = fn()
+        BACKOFF.success(source)
+        return result
+    except Exception as exc:
+        delay = BACKOFF.failure(source, exc)
+        console.print(f"[red]{label} failed — backoff {delay:.0f}s[/red]")
+        if BACKOFF.failure_count(source) <= 1:
+            traceback.print_exc()
+        return None
+
+
 def collect_copy_candidates() -> list[dict]:
-    """Fetch recent trades from configured copy wallets / optional public feeds."""
     if not config.MONITOR_COPY_ENABLED:
         return []
     if not gmgn_fetcher.available():
@@ -443,51 +392,49 @@ def collect_copy_candidates() -> list[dict]:
 
     trades: list[dict] = []
     for wallet in wallets:
-        try:
-            rows = gmgn_fetcher.fetch_wallet_activity(wallet)
-            console.print(
-                f"  gmgn copy wallet {wallet[:4]}…{wallet[-4:]}: "
-                f"{len(rows)} recent trades"
-            )
-            trades.extend(rows)
-        except Exception:
-            console.print(f"[red]GMGN wallet activity failed for {wallet[:8]}…[/red]")
-            traceback.print_exc()
+        rows = _fetch_with_backoff(
+            f"gmgn_wallet:{wallet[:8]}",
+            lambda w=wallet: gmgn_fetcher.fetch_wallet_activity(w),
+            label=f"GMGN wallet {wallet[:8]}…",
+        )
+        if rows is None:
+            continue
+        console.print(
+            f"  gmgn copy wallet {wallet[:4]}…{wallet[-4:]}: "
+            f"{len(rows)} recent trades"
+        )
+        trades.extend(rows)
 
     if config.MONITOR_COPY_USE_SMARTMONEY:
-        try:
-            rows = gmgn_fetcher.fetch_track_trades("smartmoney")
+        rows = _fetch_with_backoff(
+            "gmgn_smartmoney",
+            lambda: gmgn_fetcher.fetch_track_trades("smartmoney"),
+            label="GMGN smartmoney",
+        )
+        if rows is not None:
             console.print(f"  gmgn smartmoney: {len(rows)} trades")
             trades.extend(rows)
-        except Exception:
-            console.print("[red]GMGN smartmoney feed failed[/red]")
-            traceback.print_exc()
 
     if config.MONITOR_COPY_USE_KOL:
-        try:
-            rows = gmgn_fetcher.fetch_track_trades("kol")
+        rows = _fetch_with_backoff(
+            "gmgn_kol",
+            lambda: gmgn_fetcher.fetch_track_trades("kol"),
+            label="GMGN kol",
+        )
+        if rows is not None:
             console.print(f"  gmgn kol: {len(rows)} trades")
             trades.extend(rows)
-        except Exception:
-            console.print("[red]GMGN kol feed failed[/red]")
-            traceback.print_exc()
 
     return trades
 
 
 def investigate_copy_trades(trades: list[dict]) -> list[dict]:
-    """Attach GMGN token info/security to each trade (buys first, capped).
-
-    Investigates each mint once, then fans the dossier out to every wallet
-    fill on that mint (avoids re-fetching Scamlon 4× when 4 wallets ape it).
-    """
     if not config.MONITOR_COPY_INVESTIGATE or not trades:
         return trades
 
     buys = [t for t in trades if t.get("side") == "buy"]
     sells = [t for t in trades if t.get("side") != "buy"]
 
-    # Unique mints first (preserve buy order), capped
     mint_order: list[str] = []
     for t in buys:
         mint = t.get("mint") or ""
@@ -504,19 +451,20 @@ def investigate_copy_trades(trades: list[dict]) -> list[dict]:
     dossier_by_mint: dict[str, dict] = {}
     for mint in mint_batch:
         sample = next(t for t in buys if t.get("mint") == mint)
-        console.print(
-            f"  investigating {sample.get('symbol')} ({mint[:8]}…)…"
+        console.print(f"  investigating {sample.get('symbol')} ({mint[:8]}…)…")
+        result = _fetch_with_backoff(
+            f"gmgn_invest:{mint[:8]}",
+            lambda s=sample: gmgn_fetcher.investigate_token(s),
+            label=f"investigate {sample.get('symbol')}",
         )
-        try:
-            dossier_by_mint[mint] = gmgn_fetcher.investigate_token(sample)
-        except Exception:
-            console.print(f"  [red]investigate failed for {sample.get('symbol')}[/red]")
-            traceback.print_exc()
+        if result is None:
             dossier_by_mint[mint] = {
                 **sample,
                 "investigation_quick": "unknown",
                 "investigation_flags": ["investigate_failed"],
             }
+        else:
+            dossier_by_mint[mint] = result
 
     out: list[dict] = []
     for t in buys:
@@ -525,8 +473,7 @@ def investigate_copy_trades(trades: list[dict]) -> list[dict]:
         if not dossier:
             out.append({**t, "investigation_quick": t.get("investigation_quick") or "skipped"})
             continue
-        # Keep this fill's wallet/tx/size; reuse shared token dossier
-        merged = {
+        out.append({
             **dossier,
             "wallet": t.get("wallet"),
             "tx_hash": t.get("tx_hash"),
@@ -535,8 +482,7 @@ def investigate_copy_trades(trades: list[dict]) -> list[dict]:
             "seen_key": t.get("seen_key"),
             "source": t.get("source"),
             "price": t.get("price") if t.get("price") is not None else dossier.get("price"),
-        }
-        out.append(merged)
+        })
     for t in sells:
         out.append({**t, "investigation_quick": t.get("investigation_quick") or "skipped"})
     return out
@@ -545,18 +491,16 @@ def investigate_copy_trades(trades: list[dict]) -> list[dict]:
 def collect_candidates() -> list[dict]:
     tokens: list[dict] = []
 
-    try:
-        tokens.extend(fetch_graduated())
-    except Exception:
-        console.print("[red]pump.fun Migrated fetch failed[/red]")
-        traceback.print_exc()
+    rows = _fetch_with_backoff("pumpfun_graduated", fetch_graduated, label="pump.fun Migrated")
+    if rows:
+        tokens.extend(rows)
 
     if config.MONITOR_WATCH_NEAR_GRADUATION:
-        try:
-            tokens.extend(fetch_near_graduation())
-        except Exception:
-            console.print("[red]pump.fun Almost fetch failed[/red]")
-            traceback.print_exc()
+        rows = _fetch_with_backoff(
+            "pumpfun_near", fetch_near_graduation, label="pump.fun Almost"
+        )
+        if rows:
+            tokens.extend(rows)
 
     if config.MONITOR_USE_GMGN:
         if not gmgn_fetcher.available():
@@ -565,8 +509,10 @@ def collect_candidates() -> list[dict]:
                 "(https://gmgn.ai/ai)[/yellow]"
             )
         else:
-            try:
-                gmgn_tokens = gmgn_fetcher.fetch_trenches()
+            gmgn_tokens = _fetch_with_backoff(
+                "gmgn_trenches", gmgn_fetcher.fetch_trenches, label="GMGN trenches"
+            )
+            if gmgn_tokens is not None:
                 by_kind: dict[str, int] = {}
                 for t in gmgn_tokens:
                     by_kind[t["kind"]] = by_kind.get(t["kind"], 0) + 1
@@ -579,13 +525,12 @@ def collect_candidates() -> list[dict]:
                     f"({', '.join(parts)})"
                 )
                 tokens.extend(gmgn_tokens)
-            except Exception:
-                console.print("[red]GMGN trenches fetch failed[/red]")
-                traceback.print_exc()
 
     if config.MONITOR_USE_DEXSCREENER:
-        try:
-            dex = fetch_solana_markets()
+        dex = _fetch_with_backoff(
+            "dexscreener", fetch_solana_markets, label="DexScreener Solana"
+        )
+        if dex is not None:
             by_kind: dict[str, int] = {}
             for t in dex:
                 by_kind[t["kind"]] = by_kind.get(t["kind"], 0) + 1
@@ -595,9 +540,6 @@ def collect_candidates() -> list[dict]:
                 f"boosts={by_kind.get('dex_boost', 0)})"
             )
             tokens.extend(dex)
-        except Exception:
-            console.print("[red]DexScreener Solana fetch failed[/red]")
-            traceback.print_exc()
 
     tokens = _dedupe(tokens)
 
@@ -632,103 +574,115 @@ def collect_candidates() -> list[dict]:
     return tokens
 
 
-def run_swarm(hits: list[dict]) -> list[tuple[dict, object, str | None]]:
-    """Analyze up to MONITOR_SWARM_MAX_PER_POLL hits; log + optional paper buy.
-
-    Skips mints already swarm-analyzed (once per mint). Prefers Migrated/Almost
-    over brand-new bonding-curve noise when capping.
-    """
-    if not config.MONITOR_SWARM_ENABLED or not hits:
-        return []
-
+def _enqueue_for_swarm(token: dict, *, reason: str = "new") -> bool:
     swarm_kinds = set(getattr(config, "MONITOR_SWARM_KINDS", None) or [])
-    done = _load_swarm_done()
-    queue: list[dict] = []
-    queued_mints: set[str] = set()
-    skipped = 0
-    skipped_kind = 0
-    for tok in hits:
-        if swarm_kinds and tok.get("kind") not in swarm_kinds:
-            skipped_kind += 1
-            continue
-        mint = tok.get("mint") or ""
-        if config.MONITOR_SWARM_ONCE_PER_MINT and mint:
-            if mint in done or mint in queued_mints:
-                skipped += 1
-                continue
-            queued_mints.add(mint)
-        queue.append(tok)
+    kind = token.get("kind") or ""
+    if swarm_kinds and kind not in swarm_kinds:
+        return False
+    mint = token.get("mint") or ""
+    if not monitor_state.should_swarm(mint, kind):
+        return False
+    token = {**token, "_alert_key": token.get("_alert_key") or _alert_key(token)}
+    jid = monitor_state.enqueue_job(token, reason=reason)
+    return bool(jid)
 
-    queue.sort(key=_swarm_sort_key)
-    batch = queue[: config.MONITOR_SWARM_MAX_PER_POLL]
-    if skipped_kind:
-        console.print(
-            f"  [dim]swarm skip {skipped_kind} hit(s) outside "
-            f"{', '.join(sorted(swarm_kinds))}[/dim]"
-        )
-    if skipped:
-        console.print(f"  [dim]swarm skip {skipped} already-analyzed / duplicate mint(s)[/dim]")
-    if len(queue) > len(batch):
-        console.print(
-            f"  [yellow]swarm capped at {len(batch)}/{len(queue)} candidates "
-            f"this poll (priority: Migrated → Almost)[/yellow]"
-        )
 
-    results = []
-    for tok in batch:
-        mint = tok.get("mint") or ""
-        # Re-check in case an earlier item in this batch just finished
-        if config.MONITOR_SWARM_ONCE_PER_MINT and mint and mint in done:
-            continue
-        label = KIND_LABEL.get(tok.get("kind"), tok.get("kind"))
-        console.print(f"  swarm analyzing {tok.get('symbol')} ({label})…")
-        try:
-            verdict = analyze_token(tok)
-        except Exception:
-            console.print(f"  [red]swarm failed for {tok.get('symbol')}[/red]")
-            traceback.print_exc()
-            if mint:
-                done.add(mint)  # don't retry forever on hard failures
-            continue
-        bought = None
-        try:
-            bought = maybe_buy(tok, verdict)
-            if bought:
-                console.print(
-                    f"  [green]{config.MONITOR_PAPER_STRATEGY}: BUY {bought}[/green] "
-                    f"— {verdict.verdict} conf={verdict.confidence}"
-                )
-        except Exception:
-            console.print(f"  [red]paper buy failed for {tok.get('symbol')}[/red]")
-            traceback.print_exc()
-        _log_verdict(tok, verdict, bought)
-        results.append((tok, verdict, bought))
+def process_swarm_job(job: dict) -> tuple[dict, object, str | None] | None:
+    """Analyze one pending job; ack + mark seen/done only after success."""
+    token = dict(job.get("token") or {})
+    mint = token.get("mint") or job.get("mint") or ""
+    kind = token.get("kind") or job.get("kind") or ""
+    alert_key = job.get("alert_key") or token.get("_alert_key") or _alert_key(token)
+    label = KIND_LABEL.get(kind, kind)
+    console.print(f"  swarm analyzing {token.get('symbol')} ({label})…")
+
+    try:
+        verdict = analyze_token(token)
+    except Exception:
+        console.print(f"  [red]swarm failed for {token.get('symbol')}[/red]")
+        traceback.print_exc()
+        # Permanent fail: don't retry forever
         if mint:
-            done.add(mint)
+            monitor_state.mark_swarm_done(mint, kind)
+        if alert_key:
+            monitor_state.mark_seen(alert_key, kind=kind)
+        monitor_state.ack_job(job["id"])
+        return None
 
-    _save_swarm_done(done)
-    _print_verdicts(results)
-    return results
+    bought = None
+    try:
+        bought = maybe_buy(token, verdict)
+        if bought:
+            console.print(
+                f"  [green]{config.MONITOR_PAPER_STRATEGY}: BUY {bought}[/green] "
+                f"— {verdict.verdict} conf={verdict.confidence}"
+            )
+    except Exception:
+        console.print(f"  [red]paper buy failed for {token.get('symbol')}[/red]")
+        traceback.print_exc()
+
+    _log_verdict(token, verdict, bought)
+    if mint:
+        monitor_state.mark_swarm_done(mint, kind)
+    if alert_key and not str(alert_key).startswith("copy:"):
+        # Copy fills use per-tx seen keys marked at enqueue time after logging
+        monitor_state.mark_seen(alert_key, kind=kind)
+    monitor_state.ack_job(job["id"])
+    return (token, verdict, bought)
+
+
+def worker_loop():
+    """Background consumer for durable swarm queue."""
+    _bootstrap_swarm_done_from_csv()
+    idle = getattr(config, "MONITOR_WORKER_IDLE_SECONDS", 1.0)
+    while not _worker_stop.is_set():
+        try:
+            touch_heartbeat("worker", pending=monitor_state.pending_count())
+            if not config.MONITOR_SWARM_ENABLED:
+                _worker_stop.wait(idle)
+                continue
+            jobs = monitor_state.pop_next_jobs(config.MONITOR_SWARM_MAX_PER_POLL)
+            if not jobs:
+                _worker_stop.wait(idle)
+                continue
+            results = []
+            for job in jobs:
+                if _worker_stop.is_set():
+                    break
+                # Re-check stage gate in case another worker path finished
+                mint = job.get("mint") or ""
+                kind = job.get("kind") or ""
+                if mint and not monitor_state.should_swarm(mint, kind):
+                    monitor_state.ack_job(job["id"])
+                    continue
+                row = process_swarm_job(job)
+                if row:
+                    results.append(row)
+                touch_heartbeat("worker", pending=monitor_state.pending_count())
+            if results:
+                _print_verdicts(results)
+        except Exception:
+            console.print("[red]swarm worker error:[/red]")
+            traceback.print_exc()
+            _worker_stop.wait(idle)
 
 
 def poll_copy_once(*, seed: bool = False, first_run: bool = False) -> list[dict]:
-    """Poll copy wallets; investigate + swarm new buy trades."""
     if not config.MONITOR_COPY_ENABLED:
         return []
 
-    seen = _load_seen()
     trades = collect_copy_candidates()
     new_hits: list[dict] = []
     for t in trades:
         key = t.get("seen_key") or f"copy:{t.get('wallet')}:{t.get('tx_hash')}:{t.get('mint')}"
-        if key in seen:
+        if monitor_state.is_seen(key):
             continue
-        seen.add(key)
+        t = {**t, "seen_key": key, "_alert_key": key}
         new_hits.append(t)
 
-    _save_seen(seen)
-
     if seed or first_run:
+        for t in new_hits:
+            monitor_state.mark_seen(t["seen_key"], kind="copy")
         console.print(
             f"[yellow]Seeded {len(new_hits)} copy-trade events as seen "
             f"(no alerts).[/yellow]"
@@ -738,12 +692,32 @@ def poll_copy_once(*, seed: bool = False, first_run: bool = False) -> list[dict]
     if not new_hits:
         return []
 
+    # Mark copy tx keys seen after we accept them into this poll (before investigate)
+    # so a crash mid-investigate won't infinite-replay the same txs — but swarm
+    # jobs for buys are still durable in pending.
+    for t in new_hits:
+        monitor_state.mark_seen(t["seen_key"], kind="copy")
+
     investigated = investigate_copy_trades(new_hits)
     _log_copy_trades(investigated)
     _print_copy_trades(investigated)
 
-    # Swarm only buys that look at least tentatively real / caution — once per mint
-    to_swarm: list[dict] = []
+    # Mirror sells from the entry wallet
+    for t in investigated:
+        if t.get("side") != "sell":
+            continue
+        try:
+            closed = maybe_sell_copy(t)
+            if closed:
+                console.print(
+                    f"  [yellow]{config.MONITOR_PAPER_STRATEGY}: "
+                    f"COPY-SELL {closed}[/yellow]"
+                )
+        except Exception:
+            console.print(f"  [red]copy-sell failed for {t.get('symbol')}[/red]")
+            traceback.print_exc()
+
+    queued = 0
     swarm_mints: set[str] = set()
     for t in investigated:
         if t.get("side") != "buy":
@@ -755,15 +729,15 @@ def poll_copy_once(*, seed: bool = False, first_run: bool = False) -> list[dict]
             continue
         if mint:
             swarm_mints.add(mint)
-        to_swarm.append(t)
-    if to_swarm:
-        run_swarm(to_swarm)
+        if _enqueue_for_swarm(t, reason="copy"):
+            queued += 1
+    if queued:
+        console.print(f"  [dim]queued {queued} copy mint(s) for swarm[/dim]")
     return investigated
 
 
 def poll_once(*, seed: bool = False) -> list[dict]:
-    """Fetch + filter. Returns newly seen hits (empty when seeding)."""
-    # Manage open sniper positions every poll (even with no new hits)
+    """Fast producer: fetch, alert, enqueue — never blocks on LLM swarm."""
     if config.MONITOR_PAPER_TRADE and not seed:
         try:
             manage_open_positions(console)
@@ -771,44 +745,86 @@ def poll_once(*, seed: bool = False) -> list[dict]:
             console.print("[red]sniper position manage failed[/red]")
             traceback.print_exc()
 
-    seen = _load_seen()
+    seen = monitor_state.load_seen()
     first_run = not seen
     candidates = collect_candidates()
+    pending_jobs = monitor_state.load_pending()
+    pending_mints = {j.get("mint") for j in pending_jobs.values() if j.get("mint")}
 
-    new_hits = []
+    new_hits: list[dict] = []
+    upgrades: list[dict] = []
     for tok in candidates:
         key = _alert_key(tok)
-        if key in seen:
-            continue
-        seen.add(key)
-        new_hits.append(tok)
+        mint = tok.get("mint") or ""
+        kind = tok.get("kind") or ""
+        tok = {**tok, "_alert_key": key}
 
-    _save_seen(seen)
+        already_seen = key in seen or monitor_state.is_seen(key)
+        if not already_seen:
+            # Skip re-alerting while a prior enqueue is still pending
+            if mint and mint in pending_mints:
+                continue
+            new_hits.append(tok)
+            continue
+
+        if (
+            getattr(config, "MONITOR_SWARM_RESCORE_ON_MIGRATE", True)
+            and kind == "migrated"
+            and mint
+            and mint not in pending_mints
+            and monitor_state.should_swarm(mint, kind)
+        ):
+            upgrades.append({**tok, "_stage_upgrade": True})
 
     if seed or first_run:
+        for tok in new_hits:
+            monitor_state.mark_seen(tok["_alert_key"], kind=tok.get("kind"))
         if first_run and not seed:
             console.print(
                 f"[yellow]Seeded {len(new_hits)} current tokens as seen "
-                f"(no alerts). Future New/Almost/Migrated hits will alert.[/yellow]"
+                f"(no alerts). Future Almost/Migrated hits will alert.[/yellow]"
             )
         else:
             console.print(f"[yellow]Seeded {len(new_hits)} tokens as seen.[/yellow]")
-        # Still seed copy wallets on the same first/seed run
         poll_copy_once(seed=True, first_run=first_run)
+        touch_heartbeat("producer", pending=monitor_state.pending_count(), seeded=True)
         return []
 
-    if new_hits:
-        _log_hits(new_hits)
-        _print_hits(new_hits, "Almost / Migrated alerts")
-        run_swarm(new_hits)
+    if new_hits or upgrades:
+        if new_hits:
+            _log_hits(new_hits)
+            _print_hits(new_hits, "Almost / Migrated alerts")
+        if upgrades:
+            _print_hits(upgrades, "Stage upgrades (re-swarm)")
+
+        queued = 0
+        for tok in new_hits + upgrades:
+            reason = "stage_upgrade" if tok.get("_stage_upgrade") else "new"
+            if _enqueue_for_swarm(tok, reason=reason):
+                queued += 1
+            elif not tok.get("_stage_upgrade"):
+                # Nothing to analyze (swarm off / already done) — safe to mark seen now
+                monitor_state.mark_seen(tok["_alert_key"], kind=tok.get("kind"))
+        # New alerts stay unmarked until worker acks (pending prevents re-spam)
+        if queued:
+            console.print(
+                f"  [dim]queued {queued} job(s) for swarm "
+                f"(pending={monitor_state.pending_count()})[/dim]"
+            )
     else:
         console.print(
             f"  no new tokens  "
             f"(watching {len(candidates)} that pass filters, "
-            f"{len(seen)} seen total)"
+            f"{len(monitor_state.load_seen())} seen total, "
+            f"pending={monitor_state.pending_count()})"
         )
 
     poll_copy_once(seed=False, first_run=False)
+    touch_heartbeat(
+        "producer",
+        pending=monitor_state.pending_count(),
+        candidates=len(candidates),
+    )
     return new_hits
 
 
@@ -830,7 +846,7 @@ def main():
         sources.append(bit)
     swarm_bit = ""
     if config.MONITOR_SWARM_ENABLED:
-        swarm_bit = " + swarm"
+        swarm_bit = " + swarm/worker"
         if config.MONITOR_PAPER_TRADE:
             swarm_bit += "/sniper"
     console.print(
@@ -841,21 +857,37 @@ def main():
         f"max_age={config.MONITOR_MAX_AGE_MINUTES}m"
     )
 
-    while True:
-        try:
-            console.rule(
-                f"[bold blue]poll {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z"
-            )
-            poll_once(seed=seed)
-            seed = False
-        except KeyboardInterrupt:
-            raise
-        except Exception:
-            console.print("[red]poll failed:[/red]")
-            traceback.print_exc()
-        if once:
-            break
-        time.sleep(config.MONITOR_POLL_SECONDS)
+    worker = None
+    if config.MONITOR_SWARM_ENABLED and not seed:
+        _bootstrap_swarm_done_from_csv()
+        worker = threading.Thread(target=worker_loop, name="swarm-worker", daemon=True)
+        worker.start()
+        console.print("  [dim]swarm worker thread started[/dim]")
+
+    try:
+        while True:
+            try:
+                console.rule(
+                    f"[bold blue]poll {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z"
+                )
+                poll_once(seed=seed)
+                seed = False
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                console.print("[red]poll failed:[/red]")
+                traceback.print_exc()
+            if once:
+                # Drain a bit of the queue in --once mode
+                if config.MONITOR_SWARM_ENABLED and worker is None:
+                    for job in monitor_state.pop_next_jobs(config.MONITOR_SWARM_MAX_PER_POLL):
+                        process_swarm_job(job)
+                break
+            time.sleep(config.MONITOR_POLL_SECONDS)
+    finally:
+        _worker_stop.set()
+        if worker is not None:
+            worker.join(timeout=5)
 
 
 if __name__ == "__main__":

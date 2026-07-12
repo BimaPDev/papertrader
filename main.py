@@ -23,6 +23,7 @@ from engine.portfolio import apply_stops, close_position, equity, new_portfolio,
 from engine.store import load_state, log_equity, save_state
 from fetchers.birdeye import fetch_meme_markets
 from fetchers.coingecko import fetch_major_markets
+from monitor_heartbeat import touch_heartbeat
 from pipeline.snapshot import build_all
 from report import print_leaderboard
 from strategies import ALL_STRATEGIES
@@ -45,10 +46,13 @@ def run_cycle():
     snapshots = build_all(markets)
     if not snapshots:
         console.print("[red]No usable market data this cycle; skipping.[/red]")
+        touch_heartbeat("papertrader", status="no_data")
         return
     prices = {sym: s["price"] for sym, s in snapshots.items()}
 
     state = load_state()
+    # Sniper lives in sniper_state.json — strip any legacy shared entry
+    state.pop(config.MONITOR_PAPER_STRATEGY, None)
     equities = {}
 
     for strat in ALL_STRATEGIES:
@@ -85,6 +89,7 @@ def run_cycle():
     save_state(state)
     log_equity(equities)
     print_leaderboard()
+    touch_heartbeat("papertrader", strategies=len(ALL_STRATEGIES))
 
 
 def main():

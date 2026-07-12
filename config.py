@@ -89,6 +89,12 @@ MONITOR_NEAR_MAX_MARKET_CAP_USD = 75_000  # pump.fun grad ~$69k; keep a band
 MONITOR_SEEN_CAP = 5_000            # trim persisted mint set
 MONITOR_SEEN_BY_MINT = True         # one alert per mint (ignore New→Almost→Migrated repeats)
 MONITOR_SWARM_ONCE_PER_MINT = True  # never re-run expensive swarm on the same mint
+MONITOR_SWARM_RESCORE_ON_MIGRATE = True  # allow one re-swarm when Almost → Migrated
+MONITOR_PAPER_MAX_POSITIONS = 8     # sniper can hold more small candidates than hourly strats
+MONITOR_HEARTBEAT_MAX_AGE_SECONDS = 180  # docker healthcheck threshold
+MONITOR_SOURCE_BACKOFF_BASE_SECONDS = 30
+MONITOR_SOURCE_BACKOFF_MAX_SECONDS = 600
+MONITOR_WORKER_IDLE_SECONDS = 1.0
 
 # DexScreener Solana (https://dexscreener.com/solana) — profiles + boosts
 MONITOR_USE_DEXSCREENER = True
@@ -130,7 +136,7 @@ MONITOR_COPY_WALLETS: list[str] = [
     "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9",  # ~+$4.6k 1d, ~66% WR
     "mW4PZB45isHmnjGkLpJvjKBzVS5NXzTJ8UDyug4gTsM",  # ~+$895 1d, ~60% WR
 ]
-MONITOR_COPY_SIDES = ["buy"]          # investigate buys; sells are logged only
+MONITOR_COPY_SIDES = ["buy", "sell"]  # mirror exits when the entry wallet dumps
 MONITOR_COPY_MIN_USD = 10.0           # ignore dust fills
 MONITOR_COPY_FETCH_LIMIT = 20         # recent txs per wallet / feed
 MONITOR_COPY_MAX_AGE_MINUTES = 60     # ignore older fills when a wallet is first added

@@ -6,17 +6,30 @@ Run directly (`python report.py`) or called at the end of each cycle.
 from rich.console import Console
 from rich.table import Table
 
+import config
 from engine.metrics import summarize
 from engine.store import load_equity_curves, load_state
+from swarm.paper import sniper_equity_samples, sniper_portfolio_for_report
 
 
 def leaderboard() -> list[dict]:
-    state = load_state()
+    state = dict(load_state())
     curves = load_equity_curves()
     rows = [
         summarize(name, curves.get(name, []), portfolio)
         for name, portfolio in state.items()
+        if name != config.MONITOR_PAPER_STRATEGY
     ]
+    sniper = sniper_portfolio_for_report()
+    if sniper:
+        rows.append(
+            summarize(
+                sniper["strategy"],
+                sniper_equity_samples(),
+                sniper,
+                cycle_minutes=60.0,  # sniper equity is throttled to ~hourly
+            )
+        )
     rows.sort(key=lambda r: r["sharpe"], reverse=True)
     return rows
 

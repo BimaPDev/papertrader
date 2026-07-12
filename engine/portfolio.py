@@ -34,8 +34,16 @@ def equity(p: dict, prices: dict[str, float]) -> float:
     return total
 
 
-def open_position(p: dict, symbol: str, price: float, reason: str) -> bool:
-    if symbol in p["positions"] or len(p["positions"]) >= config.MAX_OPEN_POSITIONS:
+def open_position(
+    p: dict,
+    symbol: str,
+    price: float,
+    reason: str,
+    *,
+    max_positions: int | None = None,
+) -> bool:
+    limit = config.MAX_OPEN_POSITIONS if max_positions is None else max_positions
+    if symbol in p["positions"] or len(p["positions"]) >= limit:
         return False
     usd = p["cash"] * config.POSITION_PCT / 100
     if usd < 1:

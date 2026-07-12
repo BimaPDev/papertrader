@@ -11,7 +11,7 @@ def total_return_pct(curve: list[float]) -> float:
     return (curve[-1] / config.INITIAL_BALANCE - 1) * 100
 
 
-def sharpe(curve: list[float]) -> float:
+def sharpe(curve: list[float], *, cycle_minutes: float | None = None) -> float:
     """Annualized Sharpe from per-cycle equity samples (rf = 0)."""
     if len(curve) < 3:
         return 0.0
@@ -23,7 +23,8 @@ def sharpe(curve: list[float]) -> float:
     std = math.sqrt(var)
     if std == 0:
         return 0.0
-    cycles_per_year = 365 * 24 * 60 / config.CYCLE_MINUTES
+    minutes = cycle_minutes if cycle_minutes is not None else config.CYCLE_MINUTES
+    cycles_per_year = 365 * 24 * 60 / minutes
     return mean / std * math.sqrt(cycles_per_year)
 
 
@@ -40,7 +41,7 @@ def max_drawdown_pct(curve: list[float]) -> float:
     return worst * 100
 
 
-def decay_status(curve: list[float]) -> str:
+def decay_status(curve: list[float], *, cycle_minutes: float | None = None) -> str:
     """Rolling-vs-baseline Sharpe health check, adapted from a factor-decay
     state machine: split the equity curve in half, compare second-half Sharpe
     to first-half Sharpe. "new" until there's enough history to trust either
@@ -48,8 +49,8 @@ def decay_status(curve: list[float]) -> str:
     if len(curve) < 20:
         return "new"
     split = len(curve) // 2
-    baseline = sharpe(curve[:split])
-    rolling = sharpe(curve[split:])
+    baseline = sharpe(curve[:split], cycle_minutes=cycle_minutes)
+    rolling = sharpe(curve[split:], cycle_minutes=cycle_minutes)
     if baseline <= 0:
         return "healthy" if rolling >= 0 else "warning"
     ratio = rolling / baseline
@@ -60,18 +61,24 @@ def decay_status(curve: list[float]) -> str:
     return "decayed"
 
 
-def summarize(strategy: str, curve: list[float], portfolio: dict) -> dict:
+def summarize(
+    strategy: str,
+    curve: list[float],
+    portfolio: dict,
+    *,
+    cycle_minutes: float | None = None,
+) -> dict:
     trades = portfolio.get("total_trades", 0)
     wins = portfolio.get("winning_trades", 0)
     closed = trades - len(portfolio.get("positions", {}))
     return {
         "strategy": strategy,
         "return_pct": total_return_pct(curve),
-        "sharpe": sharpe(curve),
+        "sharpe": sharpe(curve, cycle_minutes=cycle_minutes),
         "max_dd_pct": max_drawdown_pct(curve),
         "trades": trades,
         "win_rate": (wins / closed * 100) if closed > 0 else 0.0,
         "open_positions": len(portfolio.get("positions", {})),
         "equity": curve[-1] if curve else config.INITIAL_BALANCE,
-        "health": decay_status(curve),
+        "health": decay_status(curve, cycle_minutes=cycle_minutes),
     }
