@@ -73,7 +73,7 @@ CYCLE_MINUTES = 60          # matches 1H candles; also used to annualize Sharpe
 # Watches pump.fun tokens that just completed the bonding curve ("graduated").
 # Separate from the hourly paper loop — these tokens rarely have ≥30 hourly
 # bars yet, so they won't feed strategies until you wire a short-history path.
-MONITOR_POLL_SECONDS = 30           # how often to poll pump.fun
+MONITOR_POLL_SECONDS = 15           # how often to poll pump.fun / GMGN
 MONITOR_FETCH_LIMIT = 40            # candidates pulled per source per poll
 MONITOR_MAX_AGE_MINUTES = 120       # ignore graduates older than this
 MONITOR_MIN_MARKET_CAP_USD = 5_000  # drop dust / dead post-grad prints
