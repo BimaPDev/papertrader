@@ -118,8 +118,18 @@ MONITOR_SWARM_KINDS = ["almost", "migrated"]
 # Put Solana addresses you want to mirror here, and/or set GMGN_COPY_WALLETS
 # in .env as a comma-separated list. Soft-skips when empty / no API key.
 MONITOR_COPY_ENABLED = True
+# Curated from GMGN CopyTrade-style SM/KOL activity (1d stats via OpenAPI).
+# Prefer smart_degen / high win-rate / enough sample size; skip wash_trader tags.
+# Re-score periodically — 1d leaders rotate fast.
 MONITOR_COPY_WALLETS: list[str] = [
-    # "YourCopyTargetWallet1111111111111111111111111",
+    # Launchpad SM-like (smart_degen): solid 1d PnL + win rate + trade count
+    "EJhCBXeXWfuUCT2KPXLckm8PVm7fvkiQYMuVjZYJdB2y",  # ~+$1.1k 1d, ~74% WR, ~81 txs
+    "DaKSn9Vy7pbnwuTkW1LNsd5hXskjWbjNVuXjGpNsQCLb",  # ~+$825 1d, ~71% WR, ~376 txs
+    "7gdo83WqcXvown8aHUrgma716BEwGdjRA9CtdUThBy5U",  # ~+$515 1d, ~71% WR, ~117 txs
+    # High-activity KOL (no wash_trader tag) — useful for Almost/Migrated flow
+    "Bi4rd5FH5bYEN8scZ7wevxNZyNmKHdaBcvewdPFxYdLt",  # ~+$5.9k 1d, ~67% WR
+    "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9",  # ~+$4.6k 1d, ~66% WR
+    "mW4PZB45isHmnjGkLpJvjKBzVS5NXzTJ8UDyug4gTsM",  # ~+$895 1d, ~60% WR
 ]
 MONITOR_COPY_SIDES = ["buy"]          # investigate buys; sells are logged only
 MONITOR_COPY_MIN_USD = 10.0           # ignore dust fills
