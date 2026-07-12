@@ -1,6 +1,6 @@
 ---
 name: papertrader-configure
-description: "Use when tuning PaperTrader's config.py (assets, position sizing, fees, stops, cadence) or swapping the AI provider between Claude and an OpenAI-compatible endpoint (DeepSeek/Groq/Ollama)."
+description: "Use when tuning PaperTrader's config.py (assets, position sizing, fees, stops, cadence) or swapping the AI provider between Claude, an OpenAI-compatible endpoint (DeepSeek/Groq/Ollama), or a Hermes Agent instance over SSH."
 ---
 
 # Configuring PaperTrader
@@ -19,7 +19,7 @@ Everything tunable lives in `config.py` — read live on every run, no reload/re
 | `MAX_OPEN_POSITIONS` | 3 | concurrent positions per strategy |
 | `FEE_PCT` / `SLIPPAGE_PCT` | 0.30 / 0.20 | simulated cost per side, % |
 | `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | 12.0 / 25.0 | hard exit thresholds |
-| `AI_PROVIDER` | `"claude"` | `"claude"` or `"openai_compatible"` |
+| `AI_PROVIDER` | `"hermes_ssh"` | `"claude"`, `"openai_compatible"`, or `"hermes_ssh"` |
 | `AI_MODEL` | `"claude-opus-4-8"` | swap to `"claude-haiku-4-5"` for ~5x cheaper cycles |
 | `CYCLE_MINUTES` | 60 | loop cadence; also used to annualize Sharpe |
 
@@ -35,3 +35,26 @@ OPENAI_COMPAT_MODEL = "deepseek-chat"
 OPENAI_COMPAT_KEY_ENV = "DEEPSEEK_KEY"                     # name of the .env var holding the key
 ```
 Put the actual key in `.env` under whatever env var name `OPENAI_COMPAT_KEY_ENV` points to (`DEEPSEEK_KEY` and `GROQ_API_KEY` are already scaffolded in `.env.example`). Strategies never touch provider details directly — only `llm.py` changes behavior; it hits any OpenAI-compatible chat-completions endpoint with a JSON-mode prompt instead of Claude's native structured output (since not all such providers support structured output the same way).
+
+### `hermes_ssh` — routing through a Hermes Agent instance
+
+This is the current default. Instead of calling a model API directly, `llm._hermes_ssh` SSHes into a Hermes Agent host and runs `hermes chat -q "<prompt>" -Q --source papertrader --yolo`, the same pattern this homelab's AgentOS project already uses in production — not `hermes proxy` (which is OAuth-gated and only supports `nous`/`xai` upstreams, not whatever provider Hermes's own chat is actually configured to use).
+
+```python
+AI_PROVIDER = "hermes_ssh"
+HERMES_SSH_HOST = "192.168.50.86"
+HERMES_SSH_PORT = 22
+HERMES_SSH_USER = "hermes"
+HERMES_SSH_KEY_PATH = "/app/secrets/papertrader_hermes_ed25519"
+HERMES_BIN_PATH = "/home/hermes/.hermes/hermes-agent/venv/bin/hermes"
+HERMES_WORKDIR = "/home/hermes"
+```
+
+Requirements this depends on, all outside the git repo:
+- A dedicated SSH keypair (not shared with AgentOS's own key) whose public half is appended to `authorized_keys` for the `hermes` user on the Hermes host — additive only, existing entries untouched.
+- The private key runtime-mounted at `HERMES_SSH_KEY_PATH` via `docker-compose.yml`'s `./secrets:/app/secrets:ro` volume — `secrets/` is gitignored and dockerignored, never baked into the image or committed.
+- `openssh-client` installed in the image (already in `Dockerfile`).
+
+`--yolo` auto-approves any tool/shell call Hermes decides to make mid-response — required so the headless call can't hang waiting for an interactive approval that will never come, but it means there's no confirmation gate on whatever Hermes chooses to do. This was an explicit, separate decision from picking this provider — don't assume it's free to enable on a fresh box without re-confirming.
+
+`hermes chat` is a general agent, not a raw completion API, so despite the JSON-only instruction in the prompt it may wrap the answer in extra text; `llm._extract_json` pulls the first top-level `{...}` block out of stdout rather than assuming the whole response is valid JSON.
